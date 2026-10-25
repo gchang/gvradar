@@ -38,7 +38,7 @@
  'swrmin': 0, 'swrmax': 150,
  'swazmin': 160, 'swazmax': 165,
  'swelmin': 0, 'swelmax': 20.0, 'sw_sec': 4.0,
- 'get_cal_file': False, 'cal_dir': './cal_files/'
+ 'get_cal_file': False, 'cal_dir': './cal_files/',
  'apply_cal': False, 'ref_cal': 0.2, 'zdr_cal': 0.0, 
  'use_qc_height': True, 'qc_height': 4.4,
  'output_cf': False,

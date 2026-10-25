@@ -35,6 +35,5 @@
     'use_sounding': True,
     'sounding_type': 'ruc_archive',
     'sounding_dir': './sounding/'}
-}
 
 
