@@ -1,0 +1,475 @@
+# ***************************************************************************************
+'''
+GPM-GV radar processing software.
+    -Python based Quality Control utilizing PyArt 
+    -Rainfall product generation from Dual Pol data
+
+Developed by the NASA GPM-GV group
+V0.5 - 12/06/2021 - update by Jason Pippitt NASA/GSFC/SSAI
+V1.0 - 11/01/2022 - update by Jason Pippitt NASA/GSFC/SSAI
+V1.5 - 02/02/2024 - update by Jason Pippitt NASA/GSFC/SSAI
+'''
+# ***************************************************************************************
+
+import sys, os
+os.environ['PYART_QUIET'] = '1'  # Suppress PyART citation
+import pyart
+import ast
+import numpy as np
+import argparse
+import pathlib
+from gvradar import (dp_products as dp, dpqc as qc, 
+                     common as cm, plot_images_new as pi)
+import warnings
+warnings.filterwarnings("ignore")
+
+# ***************************************************************************************
+
+class QC:
+    '''
+    Creates a class QC with a constructor and 
+    an instance method (run_dpqc).
+    '''
+
+    # Constructor:  Specifies necessary initialization parameters
+    def __init__(self, file, **kwargs):
+        
+        self.file = file
+        # D3R check
+        fbase = os.path.basename(self.file)
+        fbase = fbase.split("_")
+        D3R_file = fbase[0][2:5]
+        cfy = pathlib.Path(file).suffix
+        
+        # Uncompress input file, and create radar structure
+        if D3R_file == 'D3R' and cfy == '.nc':
+            radar = pyart.aux_io.read_d3r_gcpex_nc(self.file, file_field_names=True, read_altitude_from_nc=True)
+        else: 
+            if cfy == '.gz': 
+                self.file = cm.unzip_file(self.file)
+                file_unzip = self.file
+                radar = pyart.io.read(self.file, file_field_names=True)
+            elif cfy == '.h5':
+                radar = pyart.aux_io.read_odim_h5(self.file, file_field_names=True)
+                radar = cm.reorder_sweeps(radar)
+            elif cfy == '.hdf5':
+                temp_file = cm.remove_HDF_header(self.file)
+                radar = pyart.aux_io.read_odim_h5(temp_file, file_field_names=True)
+                os.remove(temp_file)
+                radar = cm.reorder_sweeps(radar)    
+            else:
+                radar = pyart.io.read(self.file, file_field_names=True)
+        
+        self.radar = radar
+        
+        # Check and fix missing user defined kwargs
+        default_kw = qc.get_default_thresh_dict()
+        kwargs = cm.check_kwargs(kwargs, default_kw)
+        
+        # Get site name and date time from radar
+        site_time = cm.get_site_date_time(self.radar)
+        kwargs = {**site_time, **kwargs}
+        
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+            
+        print('', 'QC parameters:    ', '', kwargs, '',
+              'Processing --> ' + self.file, sep='\n')     
+        self.kwargs = kwargs      
+        
+        # Remove temp file
+        if cfy == '.gz': os.remove(file_unzip)
+
+    # Instance Method
+    def run_dpqc(self):
+            
+    # If radar is 88D merge split cuts and remove MRLE scans
+        if self.merge_sp:
+            if self.radar.metadata['original_container'] == 'NEXRAD Level II':
+                self.radar = cm.merge_split_cuts(self)
+                self.radar = cm.remove_mrle(self)
+    
+    # Rename fields with GPM, 2-letter IDs (e.g. CZ, DR, KD)
+    # Save raw reflectivity, will be applied to DZ later
+        self.radar, zz = cm.rename_fields_in_radar(self)
+
+    # Filter D3R elevations and 4.4 km artifact
+        D3R_list = ['KaD3R', 'KuD3R']
+        if self.site in D3R_list:
+            self.radar = qc.filter_D3R_el(self, elevation_range=(0, 90), 
+                                                      azimuth_range=None, 
+                                                      copy_radar=True,
+                                                      verbose=True)
+            self.radar = qc.create_clean_radar(self, boundary_km=4.4, verbose=True)
+
+    # Create a filter to remove data beyond 200km
+        if self.radar.metadata['original_container'] == 'NEXRAD Level II' or\
+           self.radar.metadata['original_container'] == 'UF' or\
+           self.radar.metadata['original_container'] == 'odim_h5':
+            self.radar = qc.mask_88D_200(self)
+
+    # Plotting raw images
+        if self.plot_raw_images == True:
+            print('Plotting raw radar fields...', '', sep='\n')
+            pi.plot_fields(self)
+
+    # Apply calibration numbers to Reflectivity and ZDR fields
+        if self.apply_cal == True:
+            if self.get_cal_file == True:
+                cm.get_cal_numbers(self)
+            self.radar = qc.calibrate(self)    
+                        
+    # Create a filter to remove data close to radar location (e.g. cone of silence)
+        if self.do_cos == True:
+            self.radar = qc.mask_cone_of_silence(self)
+
+    # Create mask to filter a range/azm/height sector of radar
+        if self.do_sector == True:
+            self.radar = qc.sector_wipeout(self)
+           
+    # Create mask to filter a range/azm/height sector of radar based on RHOHV threshold
+        if self.do_rh_sector == True:
+            self.radar = qc.rh_sector(self)
+    
+    # Create mask to filter a range/azm/height sector of radar based on Spectrum Width threshold
+        if self.do_sw_sector == True:
+            self.radar = qc.sw_sector(self)
+
+    # Create mask to filter a range/azm/height sector of radar based on SQ threshold
+        if self.do_sq_sector == True:
+            self.radar = qc.sq_sector(self)  
+                
+    # Create Temperature and/or Height field
+        if self.use_sounding == True:
+            if self.sounding_type == 'get_ruc':
+                self.radar = cm.get_ruc_sounding(self)
+            if self.sounding_type == 'ruc':
+                self.radar = cm.use_ruc_sounding(self)
+            if self.sounding_type == 'uwy':
+                self.radar = cm.get_uwy_archive(self)
+            if self.sounding_type == 'ruc_archive':
+                if self.site == 'KWAJ':
+                    self.radar = cm.kwaj_sounding(self)
+                elif self.site == 'CPOL' or self.site == 'Reunion':
+                    self.sounding_dir = '/gpmgv3/raw/Soundings/UWY_Soundings/'
+                    self.radar = cm.get_uwy_archive(self)
+                else:
+                    try:
+                        self.radar = cm.get_ruc_archive(self)
+                    except:
+                        self.radar = cm.get_uwy_archive(self)
+
+        if self.use_sounding == False:
+            self.radar = cm.get_beam_height(self)        
+
+    # Dealiasing Velocity
+        if self.dealias_velocity == True:
+            self.radar = qc.velocity_dealias(self)  
+
+    # Apply SW filter
+        if self.do_sw_mask == True:
+            self.radar = qc.apply_SW_mask(self)
+
+    # Apply CSU_RT filters
+        self.radar = qc.csu_filters(self)
+                                                  
+    # Apply gatefilters on DP fields
+        self.radar = qc.threshold_qc_dpfields(self)
+
+    # Unfold PhiDP
+        if self.unfold_phidp == True:
+            self.radar = qc.unfold_phidp(self)
+
+    # Get KDP and Std(PhiDP)
+        if self.site not in D3R_list:
+           self.radar = qc.calculate_kdp(self)
+
+    # Create mask to filter a range/azm/height sector of radar based on KD threshold
+        if self.do_kd_sector == True:
+            self.radar = qc.kd_sector(self)
+
+    # Create mask to filter a range/azm/height sector of radar based on SD threshold
+        if self.do_sd_sector == True:
+            self.radar = qc.sd_sector(self)         
+                  
+    # Create mask to filter a range/azm/height sector of radar based on PH threshold
+        if self.do_ph_sector == True:
+            self.radar = qc.ph_sector(self)
+                
+    # Perform gatefilters for calculated fields
+        if self.site not in D3R_list:
+            self.radar = qc.threshold_qc_calfields(self)       
+        
+    # Add uncorrected reflectiviy field to radar structure.
+        self.radar.add_field('DZ', zz, replace_existing=True)
+    
+    # Remove QC threshold fields from radar
+        self.radar = qc.remove_fields_from_radar(self)       
+    
+    # Plotting images 
+        if self.plot_images == True:   
+            pi.plot_fields(self)
+    
+    # Write cfRadial file
+        if self.output_cf == True:
+            self.radar = cm.remove_undesirable_fields(self)
+            self.radar = dp.set_missing(self)
+        # Write cfRadial file
+            cm.output_cf(self)        
+
+    # Write xarray Grid file
+        if self.output_grid == True:
+            cm.output_grid(self)        
+    
+        return self.radar   
+    
+# ***************************************************************************************   
+
+class DP_products:
+    '''
+    Creates a class DP_products with a constructor and 
+    an instance method (run_DP_products).
+    '''
+
+    # Constructor:  Specifies necessary initialization parameters
+    def __init__(self, file, radar, **kwargs):
+        self.file = file
+        
+        # Uncompress input file, and create radar structure
+        cfy = pathlib.Path(file).suffix
+        if self.file == 'QC_radar':
+            self.radar = radar
+        else:
+            self.file = file
+            cfy = pathlib.Path(file).suffix
+            if cfy == '.gz': 
+                file_unzip = cm.unzip_file(self.file)  
+                radar = pyart.io.read(file_unzip, file_field_names=True)
+            else:
+                radar = pyart.io.read(self.file, file_field_names=True)        
+            
+            self.radar = radar
+        
+        # Check and fix missing user defined kwargs
+        default_product = dp.get_default_product_dict()
+        kwargs = cm.check_kwargs(kwargs, default_product)
+
+        # Get site name and date time from radar
+        site_time = cm.get_site_date_time(self.radar)
+        kwargs = {**site_time, **kwargs}
+        
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        
+        print('', 'DP products parameters:    ', '', kwargs, '', 
+              'Processing --> ' + file, sep='\n')    
+        self.kwargs = kwargs
+        
+        # Remove temp file
+        if cfy == '.gz': os.remove(file_unzip)
+
+    # Instance Method
+    def run_DP_products(self):
+        
+    # Rename fields with GPM, 2-letter IDs (e.g. CZ, DR, KD)
+        self.radar, zz = cm.rename_fields_in_radar(self)
+
+    # Check for negative azimuths
+        if self.radar.azimuth['data'][0] < 0:
+            print(f"Fixing Negative Azimuths")
+            self.radar.azimuth['data'] = np.mod(self.radar.azimuth['data'], 360)
+            az = self.radar.get_azimuth(0)
+            print(f"Azimuth Min/Max:  {az.min()} {az.max()}")
+
+    # Apply calibration numbers to Reflectivity and ZDR fields
+        if self.apply_cal == True:
+            if self.get_cal_file == True:
+                cm.get_cal_numbers(self)
+            self.radar = qc.calibrate(self)
+
+    # If no KDP, calculate field
+        if 'KD' not in self.radar.fields.keys():  
+            self.radar = dp.get_kdp(self)
+            #self.radar = qc.calculate_kdp(self)
+        elif self.get_Bringi_kdp:
+            self.radar = dp.get_kdp(self)
+            #self.radar = qc.calculate_kdp(self)
+
+        self.dz = self.radar.fields['CZ']['data'].copy()
+        self.dr = self.radar.fields['DR']['data'].copy()
+        self.kd = self.radar.fields['KD']['data'].copy()
+        self.rh = self.radar.fields['RH']['data'].copy()
+        #self.sq = self.radar.fields['SQ']['data'].copy()
+        if 'ZZ' in self.radar.fields.keys():
+            self.zz = self.radar.fields['ZZ']['data'].copy()
+        else:
+            try:
+                self.zz = self.radar.fields['DZ']['data'].copy()
+            except:
+                self.zz = self.radar.fields['CZ']['data'].copy()
+
+        print('', 'Calculating DP products:  ', sep='\n')
+       
+    # Create Temperature field   
+        if self.use_sounding == True:
+            if self.sounding_type == 'get_ruc':
+                self.radar = cm.get_ruc_sounding(self)
+            if self.sounding_type == 'ruc':
+                self.radar = cm.use_ruc_sounding(self)
+            if self.sounding_type == 'uwy':
+                self.radar = cm.get_uwy_archive(self)
+            if self.sounding_type == 'ruc_archive':
+                if self.site == 'KWAJ':
+                    self.radar = cm.kwaj_sounding(self)
+                elif self.site == 'CPOL' or self.site == 'Reunion' or self.site == 'CP2':
+                    self.sounding_dir = '/gpmgv3/raw/Soundings/UWY_Soundings/'
+                    self.radar = cm.get_uwy_archive(self)
+                else:
+                    try:
+                        self.radar = cm.get_ruc_archive(self)
+                    except:
+                        self.radar = cm.get_uwy_archive(self)
+                
+            self.radar_T = self.radar.fields['TEMP']['data']
+            self.radar_z = self.radar.fields['HEIGHT']['data']
+
+    # Get HID scores and add FH to radar
+            if self.do_HID_summer or self.do_HID_winter == True:
+                self.radar = dp.add_csu_fhc(self)
+                self.fh = self.radar.fields['FH']['data']
+
+    # Get Radar Echo Classification based on Besic et al. 2016
+            if self.get_echo_class:
+                self.radar = dp.add_hydroclass(self)
+            
+    # Calculate Drop-Size Distribution from Tokay et al. 2020 and add to radar
+            if self.do_tokay_DSD == True:
+                if self.site == 'CPOL':
+                    self.radar = dp.get_gatlin_DM(self)
+                else:     
+                    self.radar = dp.add_calc_dsd_sband_tokay_2020(self)
+
+    # Calculate Cifelli et al. 2011 ice and water mass fields and add to radar.
+    # Function expects, reflectivity, differential reflectivity, 
+    # and altitude (km MSL) at a minimum. Temperature is optional.
+            if self.do_mass == True:
+                self.radar = dp.add_csu_liquid_ice_mass(self)
+        
+    # Calculate Blended-rain from Cifelli et al. 2011 and addr to radar
+            if self.do_RC == True:
+                self.radar = dp.add_csu_blended_rain(self)
+
+    # Calculate Tropical Blended-rain from Cifelli et al. 2011 and addr to radar
+            if self.do_RT == True:
+                self.radar = dp.add_csu_blended_rain_tropical(self)            
+
+    # Calculate Bringi PolZR rainrate
+            if self.do_RP == True:
+                self.radar = dp.add_polZR_rr(self)
+
+    # Calculate RA rainrate
+            if self.do_RA == True:
+                self.radar = dp.add_ra(self)
+     
+        else:  
+            print('', 'Sounding file required to create HID, Ice and Water Mass and RC', '', sep='\n')
+            
+        # Set data beyond 150 km to missing
+        if self.do_150_mask == True:
+            self.radar = dp.mask_beyond_150(self)
+
+        # Set data blockages to -888
+        if self.do_block_mask == True:
+            KMQT_blockage_1 = {'hmin': 0, 'hmax': None, 'rmin': 0 * 1000, 'rmax': 200 * 1000,
+                     'azmin': 315, 'azmax': 345, 'elmin': 0, 'elmax': None}
+            KMQT_blockage_2 = {'hmin': 0, 'hmax': None, 'rmin': 0 * 1000, 'rmax': 200 * 1000,
+                     'azmin': 20, 'azmax': 25, 'elmin': 0, 'elmax': None}
+            blockage = [KMQT_blockage_1, KMQT_blockage_2]
+            self.radar = dp.set_blockage(self, blockage)
+
+        print('DP products complete.')
+    
+    # Calculate Conv/Strat
+        conv_strat =  False
+        self.plot_conv_strat = False
+        if conv_strat == True:
+            dp.get_conv_strat(self)
+
+    # Plot radar images
+        if self.plot_images == True:
+            print()
+            pi.plot_fields(self)       
+        
+    # Remove unwanted fields from radar and write cfRadial
+        if self.output_cf == True:
+            self.radar = cm.remove_undesirable_fields(self)
+            self.radar = dp.set_missing(self)
+        # Write cfRadial file
+            cm.output_cf(self)
+
+    # Write xarray Grid file
+        if self.output_grid == True:
+            cm.output_grid(self)
+
+def print_welcome():
+    from datetime import datetime
+    print("\n" + "="*70)
+    print(" GVradar".center(70))
+    print(" Global Precipitation Measurement (GPM)".center(70))
+    print(" Ground Validation (GV) Radar Processing Software".center(70))
+    print("="*70)
+    print(f" Version: 1.5.0 | Date: {datetime.now().strftime('%Y-%m-%d')}".center(70))
+    print("="*70)
+    print(f" Contact:  jason.l.pippitt@nasa.gov".center(70))
+    print("="*70 + "\n")
+ 
+# *******************************************  M  A  I  N  **************************************************
+
+if __name__ == '__main__':
+            
+    runargs = argparse.ArgumentParser(description='User information')
+    runargs.add_argument('file', type=str, help='File to process')
+    runargs.add_argument('--thresh_dict', dest='thresh_dict', type=str, help='Threshold dictionary')
+    runargs.add_argument('--product_dict', dest='product_dict', type=str, help='DP product dictionary')
+    runargs.add_argument('--do_qc', action="store_true", help='Run QC')
+    runargs.add_argument('--dp_products', action="store_true", help='Create DP products')
+
+    args = runargs.parse_args() 
+
+    if args.do_qc and args.thresh_dict == None: print('No threshold dictionary, applying default thresholds.')
+    if args.dp_products and args.product_dict == None: print('No product dictionary, applying defaults.')
+    if args.do_qc == False and args.dp_products == False: sys.exit('Please specify actions: --do_qc --dp_products at least 1 must be selected.')
+
+    file = args.file
+
+    # Import QC thresholds and in out dirs
+    if args.thresh_dict == None:
+        kwargs = qc.get_default_thresh_dict()
+    else:
+        current_dict = args.thresh_dict
+        kwargs = ast.literal_eval(open(current_dict).read())
+
+    # Import DP products thresholds and in out dirs
+    if args.product_dict == None:
+        kwargs_product = dp.get_default_product_dict()
+    else:
+        product_dict = args.product_dict
+        kwargs_product = ast.literal_eval(open(product_dict).read())
+        
+    # If do_qc = True create QC Class with class variables
+    if args.do_qc:
+        q = QC(file, **kwargs)
+        qc_radar = q.run_dpqc()
+
+    # If dp_products = True create  DP_products Class with class variables
+    if args.dp_products:
+        radar = []
+        if args.dp_products and args.do_qc:
+            file = 'QC_radar'
+            radar = qc_radar
+            
+        d = DP_products(file, radar, **kwargs_product)
+        d.run_DP_products()
+
+print_welcome()
+
