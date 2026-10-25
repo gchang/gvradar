@@ -1251,8 +1251,8 @@ def calculate_kdp(self):
         STDPHIB = np.zeros((self.radar.nrays, self.radar.ngates), dtype=float) - 32767.0
         
     # Add fields to radar object
-    # Add KD (Kdp) field
-    if self.get_Bringi_kdp:
+    # Add KD (Kdp) field, also when the radar has no Kdp of its own (e.g. NEXRAD)
+    if self.get_Bringi_kdp or 'KD' not in self.radar.fields:
         print('    Adding Bringi Kdp field to radar object...')
         self.radar = cm.add_field_to_radar_object(
             KDPB, self.radar, 
