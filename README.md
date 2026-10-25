@@ -22,6 +22,8 @@ Installing GVradar
 
 We suggest creating an environment, GVradar.  Install the following programs.
 
+`environment.yml` lists the conda-forge packages: `conda env create -f environment.yml`, then install the tarballs below.
+
 * Download [CSU Radar Tools](https://pmm-gv.gsfc.nasa.gov/pub/NPOL/temp/GVradar/CSU_RadarTools-master.tar.gz) tarball.
 * Download [SkewT](https://pmm-gv.gsfc.nasa.gov/pub/NPOL/temp/GVradar/SkewT-master.tar.gz) tarball.
 * Download [GVradar](https://pmm-gv.gsfc.nasa.gov/pub/NPOL/temp/GVradar/GVradarV1.5.tar.gz) tarball.

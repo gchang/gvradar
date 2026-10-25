@@ -1,0 +1,21 @@
+# Conda environment for GVradar (conda-forge). CSU_RadarTools and SkewT are not on conda-forge:
+# install them afterward from the tarballs linked in the README, then GVradar itself with pip.
+name: gvradar
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - arm_pyart
+  - numpy<2          # SkewT uses numpy.trapz, which NumPy 2 removed
+  - scipy
+  - matplotlib
+  - netcdf4
+  - cartopy
+  - pandas
+  - xarray
+  - cftime
+  - pillow
+  - cython           # CSU_RadarTools builds Cython code
+  - c-compiler
+  - pip
+  - setuptools
